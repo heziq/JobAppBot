@@ -18,12 +18,13 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
 from jobFilter import application_guidance, cover_letter, profile as prof
 from jobFilter.store import ACTIVE_STATUSES, Store
-from jobFilter.application_state import RESULT_SCHEMA, structured_result, work_directory
+from jobFilter.application_state import RESULT_SCHEMA, structured_result, work_directory, enforce_description_review
 from jobFilter.providers import CLAUDE, CODEX, validate_engine
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -172,6 +173,12 @@ def resume_message(questions: list[dict[str, Any]], work_dir: Path, after: Optio
         parts.append("The user has finished the step you stopped at (account creation / sign-in / verification code / CAPTCHA) "
                      "in the application tab. Find that tab (tabs_context_mcp), take a screenshot, re-read the page, and continue "
                      "from its current state. Do not open the apply URL again and do not touch password fields.")
+    if after == "error_max_turns":
+        parts.append("The previous attempt reached its turn limit, not completion. Resume the existing application tab "
+                     "from this session; inspect its live state and finish remaining fields. Do not reopen the posting, "
+                     "upload again or redo verified work unless the page shows it was lost. If the original tab is "
+                     "missing, report that instead of starting a duplicate. Read the current matching platform guide; "
+                     f"for Oracle use {application_guidance.GUIDES / 'wizards.md'}. Never submit.")
     if questions:
         lines = [f"- Q: {q['question']}\n  A: {q['answer']}" for q in questions]
         parts.append("The user answered the open questions:\n" + "\n".join(lines) + "\n\nFill these answers in.")
@@ -218,6 +225,20 @@ def _still_running(store: Store, job_id: str) -> bool:
     return bool(current) and current["status"] == "running"
 
 
+def claude_failure_summary(event: dict[str, Any], returncode: int, output_tail=()) -> str:
+    errors = event.get("errors") or []
+    if isinstance(errors, (str, dict)):
+        errors = [errors]
+    detail = "; ".join(str(e.get("message", e) if isinstance(e, dict) else e) for e in errors)
+    detail = (detail or event.get("result") or "\n".join(output_tail))[:1500]
+    if event.get("subtype") == "error_max_turns":
+        action = ("Run again resumes the same Claude session and existing application tab."
+                  if event.get("session_id") else "No resumable session was returned; inspect the existing browser tab before retrying.")
+        return "Claude reached this attempt's turn limit before finishing. " + detail + ". " + action
+    label = (event.get("subtype") or f"exit code {returncode}") if returncode or event.get("is_error") else "missing application result"
+    return f"Claude could not finish ({label}). " + (detail or "No error details were returned; check the application activity log.")
+
+
 def _log_event(evt: dict[str, Any], log) -> None:
     t = evt.get("type")
     if t == "assistant":
@@ -229,6 +250,8 @@ def _log_event(evt: dict[str, Any], log) -> None:
                 log.write(f"[tool] {block.get('name')} {inp[:300]}\n")
     elif t == "result":
         log.write(f"[result] subtype={evt.get('subtype')} turns={evt.get('num_turns')} cost=${evt.get('total_cost_usd', 0):.3f}\n")
+        if evt.get("is_error") or str(evt.get("subtype", "")).startswith("error"):
+            log.write(f"[error] {claude_failure_summary(evt, 1)}\n")
     elif t == "system" and evt.get("subtype") == "init":
         tools = [x for x in evt.get("tools", []) if "chrome" in x]
         log.write(f"[init] session={evt.get('session_id')} model={evt.get('model')} chrome_tools={len(tools)}\n")
@@ -253,10 +276,13 @@ def run_application(store: Store, app: dict[str, Any]) -> dict[str, Any]:
         return {"status": "failed"}
 
     answered = store.questions(job_id=job_id, status="answered")
-    last_status = (app.get("result") or {}).get("status")
+    previous_result = app.get("result") or {}
+    last_status = previous_result.get("status")
+    if previous_result.get("subtype") == "error_max_turns":
+        last_status = "error_max_turns"
     # Resume the same Claude session when the user answered questions or finished a login/CAPTCHA handoff;
-    # otherwise (first run, or a retry after a hard failure) start fresh.
-    resuming = bool(app.get("session_id")) and (bool(answered) or last_status in ("needs_login", "captcha", "needs_cover_letter"))
+    # A turn-limit stop also resumes; other hard failures start fresh.
+    resuming = bool(app.get("session_id")) and (bool(answered) or last_status in ("needs_login", "captcha", "needs_cover_letter", "error_max_turns"))
     settings = app.get("settings") or effective_settings()
     with log_path.open("a") as log:
         def note(line: str) -> None:
@@ -282,6 +308,7 @@ def run_application(store: Store, app: dict[str, Any]) -> dict[str, Any]:
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
 
     result_evt: dict[str, Any] = {}
+    output_tail = deque(maxlen=8)
     session_id = app.get("session_id")
     with log_path.open("a") as log:
         log.write(f"\n===== {'resume' if resuming else 'start'} {time.strftime('%Y-%m-%d %H:%M:%S')} model={settings['model']} =====\n")
@@ -296,6 +323,7 @@ def run_application(store: Store, app: dict[str, Any]) -> dict[str, Any]:
                 try:
                     evt = json.loads(line)
                 except ValueError:
+                    output_tail.append(line[:1000])
                     log.write(line + "\n"); log.flush()
                     continue
                 if evt.get("session_id"):
@@ -310,24 +338,26 @@ def run_application(store: Store, app: dict[str, Any]) -> dict[str, Any]:
     if not _still_running(store, job_id):   # stopped or deleted: keep what the user recorded
         return {"status": "stopped", "summary": STOP_SUMMARY}
 
-    out = structured_result(result_evt)
+    cli_failed = bool(proc.returncode or result_evt.get("is_error") or str(result_evt.get("subtype", "")).startswith("error"))
+    out = {} if cli_failed else enforce_description_review(structured_result(result_evt))
     status = out.get("status") or "failed"
-    summary = out.get("summary") or (result_evt.get("result") or f"claude exited {proc.returncode}")[:2000]
+    summary = out.get("summary") or claude_failure_summary(result_evt, proc.returncode, output_tail)
     screenshot = _store_screenshot(out.get("screenshot_path"), work_dir)
     added = append_lessons(out.get("lessons") or [], app["job"].get("company") or job_id)
     if added:
         with log_path.open("a") as log:
             log.write(f"[skill] {added} new lesson(s) archived in {application_guidance.archive_path(SKILL_PATH)}\n")
 
-    for q in answered:  # delivered
-        store.conn.execute("UPDATE questions SET status = 'sent' WHERE id = ?", (q["id"],))
-    store.replace_open_questions(job_id, out.get("unanswered_questions") or [])
+    if out:  # A CLI failure is not a completed handoff; preserve questions for continuation.
+        for q in answered:
+            store.conn.execute("UPDATE questions SET status = 'sent' WHERE id = ?", (q["id"],))
+        store.replace_open_questions(job_id, out.get("unanswered_questions") or [])
     if status == "needs_answer" and not out.get("unanswered_questions"):
         status = "failed"
     if status == "needs_cover_letter":
         status, summary = ("failed", "Stopped for a cover letter again after being given an answer. " + summary) if letter_given \
             else ("queued", COVER_LETTER_SUMMARY)
-    store.update_application(job_id, status=status, summary=summary, page_url=out.get("page_url"),
+    store.update_application(job_id, status=status, summary=summary, page_url=out.get("page_url", app.get("page_url")),
                              screenshot=screenshot, session_id=session_id, result=out or result_evt)
     store.conn.commit()
     if status == "queued":   # write the letter and continue at once, while the tab is still on that field

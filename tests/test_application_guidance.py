@@ -4,10 +4,35 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from jobFilter import application_guidance as guidance, apply_engine, profile
+from jobFilter import application_guidance as guidance, application_state, apply_engine, profile
 
 
 class GuidanceTests(unittest.TestCase):
+    def test_readiness_requires_complete_saved_description_checks(self):
+        valid = {'role': 'Backend Intern', 'expected_bullets': 4, 'saved_bullets': 4,
+                 'matches_source': True, 'saved_readback': True}
+        base = {'status': 'review_ready', 'summary': 'First marker is unconfirmed.'}
+        self.assertEqual(application_state.enforce_description_review(base)['status'], 'failed')
+        for change in ({'saved_readback': False}, {'matches_source': False}, {'saved_bullets': 3}):
+            with self.subTest(change=change):
+                result = {**base, 'role_description_review': {'status': 'verified', 'reason': '',
+                          'checks': [valid, {**valid, **change, 'role': 'Second role'}]}}
+                rejected = application_state.enforce_description_review(result)
+                self.assertEqual(rejected['status'], 'failed')
+                self.assertIn('Second role', rejected['summary'])
+                self.assertEqual(result['status'], 'review_ready', 'retain the original result')
+        result = {**base, 'summary': 'Saved values checked.', 'role_description_review': {
+            'status': 'verified', 'reason': '', 'checks': [valid]}}
+        self.assertIs(application_state.enforce_description_review(result), result)
+        for review in ({'status': 'verified', 'reason': '', 'checks': []},
+                       {'status': 'not_offered', 'reason': '', 'checks': []},
+                       {'status': 'blocked', 'reason': 'Saved values inaccessible', 'checks': [valid]}):
+            self.assertEqual(application_state.enforce_description_review(
+                {**base, 'role_description_review': review})['status'], 'failed')
+        for status in ('needs_answer', 'needs_login', 'captcha', 'needs_cover_letter', 'unavailable'):
+            result = {**base, 'status': status}
+            self.assertIs(application_state.enforce_description_review(result), result)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

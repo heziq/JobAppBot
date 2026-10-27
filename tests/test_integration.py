@@ -22,7 +22,8 @@ def add_job(store, name="test", url="https://example.com/job"):
 
 def result(status="review_ready"):
     return {"status": status, "summary": "Test form checked; not submitted.", "page_url": "https://example.com/job",
-            "filled_fields": ["Name: Alex Example"], "unanswered_questions": []}
+            "filled_fields": ["Name: Alex Example"], "unanswered_questions": [],
+        "role_description_review": {"status": "not_offered", "reason": "Fixture form has no description fields.", "checks": []}}
 
 
 VERDICT = {"statement": "no_sponsorship", "requires_citizenship": False, "company_verdict": "unknown",
@@ -236,6 +237,77 @@ class IntegrationTests(unittest.TestCase):
             apply_engine.run_application(self.store, app)
             self.assertIn("--resume", run.call_args.args[0])
             self.assertIn("claude-session", run.call_args.args[0])
+
+    def test_turn_limit_reports_cause_preserves_handoff_and_resumes_same_session(self):
+        self.store.queue_application('test')
+        self.store.update_application('test', page_url='https://example.com/draft')
+        answered = self.store.add_question('test', 'Start date?')
+        self.store.answer_question(answered, 'March 2027')
+        pending = self.store.add_question('test', 'Another question?')
+        event = {'type': 'result', 'subtype': 'error_max_turns', 'is_error': True,
+                 'errors': ['Reached maximum number of turns (120)'], 'num_turns': 121,
+                 'session_id': 'limited-session'}
+        proc = unittest.mock.Mock(stdout=io.StringIO(json.dumps(event) + '\n'), returncode=1)
+        with patch.object(apply_engine, 'find_claude', return_value='claude'), \
+                patch.object(apply_engine.subprocess, 'Popen', return_value=proc) as run:
+            stopped = apply_engine.run_application(self.store, self.store.get_application('test'))
+            self.assertEqual(stopped['status'], 'failed')
+            self.assertIn('120', stopped['summary'])
+            self.assertIn('same Claude session', stopped['summary'])
+            app = self.store.get_application('test')
+            self.assertEqual(app['session_id'], 'limited-session')
+            self.assertEqual(app['page_url'], 'https://example.com/draft')
+            self.assertEqual(app['result'], event)
+            self.assertEqual(self.store.questions(status='answered')[0]['id'], answered)
+            self.assertEqual(self.store.questions(status='open')[0]['id'], pending)
+            self.assertIn('Reached maximum number of turns (120)', Path(app['log_path']).read_text())
+            # No automatic retry or raised cap. Run again is an explicit continuation.
+            self.assertEqual(run.call_count, 1)
+            done = {'type': 'result', 'structured_output': result('needs_login'), 'session_id': 'limited-session'}
+            proc.stdout = io.StringIO(json.dumps(done) + '\n')
+            proc.returncode = 0
+            apply_engine.run_application(self.store, app)
+            cmd = run.call_args.args[0]
+            self.assertEqual(cmd[cmd.index('--resume') + 1], 'limited-session')
+            self.assertEqual(cmd[cmd.index('--max-turns') + 1], '120')
+            prompt = cmd[cmd.index('-p') + 1]
+            self.assertIn('previous attempt reached its turn limit', prompt)
+            self.assertIn('Do not reopen the posting', prompt)
+            self.assertIn('March 2027', prompt)
+
+    def test_claude_failure_details_and_nonzero_exit_override_ready_output(self):
+        self.store.queue_application('test')
+        event = {'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+                 'errors': ['OAuth session expired and could not be refreshed'],
+                 'structured_output': result()}
+        proc = unittest.mock.Mock(stdout=io.StringIO(json.dumps(event) + '\n'), returncode=1)
+        with patch.object(apply_engine, 'find_claude', return_value='claude'), \
+                patch.object(apply_engine.subprocess, 'Popen', return_value=proc):
+            out = apply_engine.run_application(self.store, self.store.get_application('test'))
+        self.assertEqual(out['status'], 'failed')
+        self.assertIn('OAuth session expired', out['summary'])
+        self.assertIn('failed to initialize', apply_engine.claude_failure_summary({}, 1, ['failed to initialize']))
+        self.assertIn('exit code 1', apply_engine.claude_failure_summary({}, 1))
+
+    def test_both_providers_refuse_ready_with_unconfirmed_saved_role_format(self):
+        unchecked = result()
+        unchecked['summary'] = 'Reached Review; the first-bullet marker is unconfirmed.'
+        unchecked.pop('role_description_review')
+        app = self.store.queue_application('test')
+        event = {'type': 'result', 'structured_output': unchecked, 'session_id': 'session'}
+        proc = unittest.mock.Mock(stdout=io.StringIO(json.dumps(event) + '\n'), returncode=0)
+        with patch.object(apply_engine, 'find_claude', return_value='claude'), \
+                patch.object(apply_engine.subprocess, 'Popen', return_value=proc):
+            self.assertEqual(apply_engine.run_application(self.store, app)['status'], 'failed')
+        self.assertIn('Not ready to submit', self.store.get_application('test')['summary'])
+        add_job(self.store, 'gpt', url='https://example.com/gpt')
+        self.store.queue_application('gpt', 'codex-playwright')
+        task = application_state.claim_application(self.store, 'gpt')
+        review = self.review_result(task)
+        review.pop('role_description_review')
+        saved = application_state.complete_application(self.store, 'gpt', task['claim_token'], review)
+        self.assertEqual(saved['status'], 'failed')
+        self.assertEqual(self.store.get_application('gpt')['page_url'], review['page_url'])
 
     def test_screening_routes_and_model_labels(self):
         for provider in ("claude", "codex"):

@@ -245,7 +245,8 @@ class CoverLetterTests(unittest.TestCase):
 ASKING = {"status": "needs_cover_letter", "summary": "Optional Cover Letter upload on the Greenhouse form.",
           "page_url": "https://example.com/job", "unanswered_questions": []}
 DONE = {"status": "review_ready", "summary": "Filled; not submitted.", "page_url": "https://example.com/job",
-        "filled_fields": ["Cover letter: Cover_Letter_Alex_Example_Acme_Corp.pdf"], "unanswered_questions": []}
+        "filled_fields": ["Cover letter: Cover_Letter_Alex_Example_Acme_Corp.pdf"], "unanswered_questions": [],
+        "role_description_review": {"status": "not_offered", "reason": "Fixture form has no description fields.", "checks": []}}
 
 
 if __name__ == "__main__":

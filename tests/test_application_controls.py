@@ -21,7 +21,8 @@ def add_job(store, job_id, title="Software Engineer - New Grad", company="SeatGe
 
 def review_ready():
     return {"status": "review_ready", "summary": "Filled; not submitted.", "page_url": "https://example.com/job",
-            "filled_fields": ["Name"], "unanswered_questions": []}
+            "filled_fields": ["Name"], "unanswered_questions": [],
+        "role_description_review": {"status": "not_offered", "reason": "Fixture form has no description fields.", "checks": []}}
 
 
 class DuplicateTests(unittest.TestCase):

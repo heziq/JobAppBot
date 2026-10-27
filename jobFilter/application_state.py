@@ -6,7 +6,7 @@ import re
 import uuid
 from pathlib import Path
 
-from jsonschema import validate
+from jsonschema import ValidationError, validate
 
 from jobFilter import profile
 from jobFilter.providers import CODEX
@@ -29,12 +29,55 @@ RESULT_SCHEMA = {
                 "why": {"type": "string"}}, "required": ["question"]},
         },
         "filled_fields": {"type": "array", "items": {"type": "string"}},
+        "role_description_review": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["verified", "not_offered", "blocked"]},
+                "reason": {"type": "string"},
+                "checks": {"type": "array", "items": {
+                    "type": "object", "properties": {
+                        "role": {"type": "string", "minLength": 1},
+                        "expected_bullets": {"type": "integer", "minimum": 1},
+                        "saved_bullets": {"type": "integer", "minimum": 0},
+                        "matches_source": {"type": "boolean"},
+                        "saved_readback": {"type": "boolean"},
+                    }, "required": ["role", "expected_bullets", "saved_bullets", "matches_source", "saved_readback"]}},
+            }, "required": ["status", "reason", "checks"],
+            "description": "Required for review_ready: every offered role description checked in full after saving; not_offered only when the form has no description fields.",
+        },
         "screenshot_path": {"type": "string"},
         "lessons": {"type": "array", "items": {"type": "string"},
                     "description": "New, reusable facts about this site's form that are NOT already in the skill notes (selectors, quirks, required questions). Empty if nothing new."},
     },
     "required": ["status", "summary", "page_url", "unanswered_questions"],
 }
+
+
+def enforce_description_review(result):
+    """Do not accept readiness when the agent omits or fails its saved-value check."""
+    if result.get("status") != "review_ready":
+        return result
+    review = result.get("role_description_review")
+    issue = "missing saved role-description verification"
+    try:
+        validate(review, RESULT_SCHEMA["properties"]["role_description_review"])
+    except ValidationError:
+        pass
+    else:
+        checks = review["checks"]
+        if review["status"] == "not_offered" and review["reason"].strip() and not checks:
+            return result
+        if review["status"] == "verified" and checks:
+            invalid = [c["role"] for c in checks if not c["saved_readback"] or not c["matches_source"]
+                       or c["expected_bullets"] != c["saved_bullets"]]
+            if not invalid:
+                return result
+            issue = "unverified or mismatched saved description: " + ", ".join(invalid)
+        elif review["reason"].strip():
+            issue = review["reason"].strip()
+    return {**result, "status": "failed", "summary":
+            "Not ready to submit: " + issue + ". Run again to repair and verify the descriptions in the existing tab.\n\n"
+            + result.get("summary", "")}
 
 
 def work_directory(job_id: str, create: bool = True) -> Path:
@@ -100,6 +143,7 @@ def complete_application(store, job_id, token, result):
             raise ValueError("Screenshot must be the current claim's screenshot_path and contain a saved image")
     if result["status"] == "review_ready" and (not result["page_url"] or not result.get("filled_fields")):
         raise ValueError("review_ready requires a page URL and the fields verified in the browser")
+    result = enforce_description_review(result)
     with store.conn:
         store.conn.execute("BEGIN IMMEDIATE")
         app = store.get_application(job_id)
