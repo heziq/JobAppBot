@@ -238,6 +238,22 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("--resume", run.call_args.args[0])
             self.assertIn("claude-session", run.call_args.args[0])
 
+    def test_description_verification_retry_resumes_legacy_and_new_results(self):
+        self.store.queue_application('test')
+        for marker in ({}, {'failure_kind': 'description_verification'}):
+            previous = {**result('failed'), **marker, 'summary': 'Not ready to submit: unverified description.',
+                        'role_description_review': {'status': 'blocked', 'reason': 'Site punctuation differs', 'checks': []}}
+            self.store.update_application('test', status='failed', session_id='existing-draft', result=previous)
+            event = {'type': 'result', 'structured_output': result('needs_login'), 'session_id': 'existing-draft'}
+            proc = unittest.mock.Mock(stdout=io.StringIO(json.dumps(event) + '\n'), returncode=0)
+            with patch.object(apply_engine, 'find_claude', return_value='claude'), \
+                    patch.object(apply_engine.subprocess, 'Popen', return_value=proc) as run:
+                apply_engine.run_application(self.store, self.store.get_application('test'))
+                cmd = run.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--resume') + 1], 'existing-draft')
+                self.assertIn('do not restart', cmd[cmd.index('-p') + 1])
+                self.assertIn('site_adjustment', cmd[cmd.index('-p') + 1])
+
     def test_turn_limit_reports_cause_preserves_handoff_and_resumes_same_session(self):
         self.store.queue_application('test')
         self.store.update_application('test', page_url='https://example.com/draft')

@@ -41,6 +41,11 @@ RESULT_SCHEMA = {
                         "saved_bullets": {"type": "integer", "minimum": 0},
                         "matches_source": {"type": "boolean"},
                         "saved_readback": {"type": "boolean"},
+                        "site_adjustment": {"anyOf": [{"type": "null"}, {"type": "object", "properties": {
+                            "reason": {"type": "string", "minLength": 1},
+                            "saved_text": {"type": "string", "minLength": 1},
+                        }, "required": ["reason", "saved_text"]}],
+                            "description": "Only for site-required punctuation changes: explain the constraint and supply the FULL saved description. Backend compares it with this role's canonical source."},
                     }, "required": ["role", "expected_bullets", "saved_bullets", "matches_source", "saved_readback"]}},
             }, "required": ["status", "reason", "checks"],
             "description": "Required for review_ready: every offered role description checked in full after saving; not_offered only when the form has no description fields.",
@@ -51,6 +56,22 @@ RESULT_SCHEMA = {
     },
     "required": ["status", "summary", "page_url", "unanswered_questions"],
 }
+
+
+def _site_adjustment_matches(check):
+    adjustment = check.get("site_adjustment") or {}
+    if not adjustment.get("reason", "").strip() or not adjustment.get("saved_text"):
+        return False
+    # Deliberately preserve every word, number, bullet marker and line boundary.
+    # Do not use fuzzy similarity or remove punctuation generally (C++, .NET, etc.).
+    def normalize(text):
+        return text.replace('\r\n', '\n').translate(str.maketrans({';': ',', '“': '"', '”': '"', '‘': "'", '’': "'"}))
+    roles = [r for r in profile.role_descriptions() if r["heading"] == check["role"]]
+    if len(roles) != 1:
+        return False
+    bullets = roles[0]["bullets"]
+    expected = '\n'.join('• ' + b.strip() for b in bullets)
+    return len(bullets) == check["expected_bullets"] and normalize(expected) == normalize(adjustment["saved_text"])
 
 
 def enforce_description_review(result):
@@ -68,15 +89,15 @@ def enforce_description_review(result):
         if review["status"] == "not_offered" and review["reason"].strip() and not checks:
             return result
         if review["status"] == "verified" and checks:
-            invalid = [c["role"] for c in checks if not c["saved_readback"] or not c["matches_source"]
+            invalid = [c["role"] for c in checks if not c["saved_readback"] or not (c["matches_source"] or _site_adjustment_matches(c))
                        or c["expected_bullets"] != c["saved_bullets"]]
             if not invalid:
                 return result
             issue = "unverified or mismatched saved description: " + ", ".join(invalid)
         elif review["reason"].strip():
             issue = review["reason"].strip()
-    return {**result, "status": "failed", "summary":
-            "Not ready to submit: " + issue + ". Run again to repair and verify the descriptions in the existing tab.\n\n"
+    return {**result, "status": "failed", "failure_kind": "description_verification", "summary":
+            "Not ready to submit: description verification needs attention — " + issue + ". Run again to repair and verify the descriptions in the existing tab.\n\n"
             + result.get("summary", "")}
 
 

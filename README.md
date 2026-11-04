@@ -59,7 +59,7 @@ In **Applications**, **Active** is expanded by default, followed by collapsible 
 
 **Profile** holds your details, resume status, and answer bank. **Answer once** saves an answer for that application; **Answer & save to bank** also makes it reusable.
 
-Before marking an application ready, both agents must save and read back each role description, checking its complete text and bullet count. Missing or failed verification keeps the attempt marked failed for correction with **Run again**; a screenshot or reaching the Review page is insufficient.
+Before marking an application ready, both agents must verify complete saved descriptions and bullet counts, using full textareas or untruncated saved cards. Site-required semicolon/comma or typographic-quote changes are allowed only after comparison with the canonical role text; missing bullets or changed facts still fail. **Run again** after a verification failure continues the existing Claude session and draft. Reaching Review alone is insufficient.
 
 If Claude reaches its per-attempt turn limit, the summary shows the reason. **Run again** continues the same session and existing application tab with the same turn cap; it does not automatically start another paid attempt.
 

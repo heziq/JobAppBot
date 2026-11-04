@@ -179,6 +179,12 @@ def resume_message(questions: list[dict[str, Any]], work_dir: Path, after: Optio
                      "upload again or redo verified work unless the page shows it was lost. If the original tab is "
                      "missing, report that instead of starting a duplicate. Read the current matching platform guide; "
                      f"for Oracle use {application_guidance.GUIDES / 'wizards.md'}. Never submit.")
+    if after == "description_verification":
+        parts.append("The application reached review but its description check needs correction. Continue in this "
+                     "session's existing application tab; do not restart, upload again or refill verified sections. "
+                     "Inspect the flagged saved descriptions, repair real omissions and report site-required punctuation "
+                     "changes using site_adjustment. Complete saved cards are valid read-back if every bullet is visible; "
+                     "reopen only ambiguous/truncated records. Return to review without submitting.")
     if questions:
         lines = [f"- Q: {q['question']}\n  A: {q['answer']}" for q in questions]
         parts.append("The user answered the open questions:\n" + "\n".join(lines) + "\n\nFill these answers in.")
@@ -280,9 +286,13 @@ def run_application(store: Store, app: dict[str, Any]) -> dict[str, Any]:
     last_status = previous_result.get("status")
     if previous_result.get("subtype") == "error_max_turns":
         last_status = "error_max_turns"
+    elif previous_result.get("failure_kind") == "description_verification" or (
+            previous_result.get("status") == "failed" and previous_result.get("role_description_review")
+            and previous_result.get("summary", "").startswith("Not ready to submit:")):
+        last_status = "description_verification"
     # Resume the same Claude session when the user answered questions or finished a login/CAPTCHA handoff;
     # A turn-limit stop also resumes; other hard failures start fresh.
-    resuming = bool(app.get("session_id")) and (bool(answered) or last_status in ("needs_login", "captcha", "needs_cover_letter", "error_max_turns"))
+    resuming = bool(app.get("session_id")) and (bool(answered) or last_status in ("needs_login", "captcha", "needs_cover_letter", "error_max_turns", "description_verification"))
     settings = app.get("settings") or effective_settings()
     with log_path.open("a") as log:
         def note(line: str) -> None:

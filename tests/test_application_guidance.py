@@ -8,6 +8,30 @@ from jobFilter import application_guidance as guidance, application_state, apply
 
 
 class GuidanceTests(unittest.TestCase):
+    def test_site_punctuation_exception_preserves_content_and_bullet_format(self):
+        source = {'heading': 'Backend Intern', 'bullets': [
+            'Protected 100K transactions daily.', 'Fixed refund logic; collaborated with QA.',
+            'Unified C++ pipelines.', 'Improved stability.']}
+        expected = '\n'.join('• ' + b for b in source['bullets'])
+        saved = expected.replace(';', ',')
+        check = {'role': source['heading'], 'expected_bullets': 4, 'saved_bullets': 4,
+                 'matches_source': False, 'saved_readback': True,
+                 'site_adjustment': {'reason': 'Form rejects semicolons.', 'saved_text': saved}}
+        def evaluate(c):
+            return application_state.enforce_description_review({'status': 'review_ready', 'summary': 'Filled.',
+                'role_description_review': {'status': 'verified', 'reason': 'Read complete saved cards.', 'checks': [c]}})
+        with patch.object(profile, 'role_descriptions', return_value=[source]):
+            self.assertEqual(evaluate(check)['status'], 'review_ready')
+            for changed in (saved.replace('100K', '10K'), saved.replace('C++', 'C'),
+                            saved[2:], saved.replace('daily.', 'daily.\n'),
+                            saved.rsplit('\n', 1)[0]):
+                with self.subTest(changed=changed):
+                    self.assertEqual(evaluate({**check, 'site_adjustment': {
+                        'reason': 'Site constraint', 'saved_text': changed}})['status'], 'failed')
+            for fields in ({'saved_readback': False}, {'saved_bullets': 3}, {'role': 'Unknown role'},
+                           {'site_adjustment': None}):
+                self.assertEqual(evaluate({**check, **fields})['status'], 'failed')
+
     def test_readiness_requires_complete_saved_description_checks(self):
         valid = {'role': 'Backend Intern', 'expected_bullets': 4, 'saved_bullets': 4,
                  'matches_source': True, 'saved_readback': True}
