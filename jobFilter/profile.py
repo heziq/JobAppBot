@@ -5,6 +5,7 @@ Files:
     setup/answers.json          [{id, question, answer, updated}] reused across applications (local, ignored)
     setup/resume/*.pdf          resumes to upload, versioned by name (*_SDE_*, *_MLE_*) (local, ignored)
     setup/cover_letter/*.docx   cover letter templates, versioned the same way      (local, ignored)
+    setup/role_descriptions.json  hand-written experience/project text for form fields (local, ignored)
     data/profile/resume*.txt    cached text extraction of each resume version        (local)
     data/profile/role_descriptions.json  the most complete description of every job and
                                 project across resume versions; rebuilt when a resume changes (local)
@@ -27,6 +28,7 @@ PROFILE_PATH = SETUP_DIR / "profile.json"
 ANSWERS_PATH = SETUP_DIR / "answers.json"
 RESUME_TEXT_PATH = PROFILE_DIR / "resume.txt"
 ROLES_PATH = PROFILE_DIR / "role_descriptions.json"
+ROLE_OVERRIDES_PATH = SETUP_DIR / "role_descriptions.json"   # hand-written, wins over the parsed resume
 RESUME_DIR = SETUP_DIR / "resume"
 COVER_LETTER_DIR = SETUP_DIR / "cover_letter"
 SETTINGS_PATH = PROFILE_DIR / "settings.json"
@@ -47,9 +49,20 @@ def _strip(obj: Any) -> Any:
 
 # ----- profile -------------------------------------------------------------
 def load_profile() -> dict[str, Any]:
+    """The applicant facts handed to the engines, with `_` notes stripped out."""
     if PROFILE_PATH.exists():
         return _strip(json.loads(PROFILE_PATH.read_text()))
     return _strip(json.loads(TEMPLATE_PATH.read_text()))
+
+
+def load_profile_raw() -> dict[str, Any]:
+    """The file exactly as stored, including `_` comment keys.
+
+    The Profile tab edits this. Serving the stripped version there would delete
+    every note in the file the first time the user pressed Save.
+    """
+    path = PROFILE_PATH if PROFILE_PATH.exists() else TEMPLATE_PATH
+    return json.loads(path.read_text())
 
 
 def profile_exists() -> bool:
@@ -252,6 +265,11 @@ def reflow_resume(raw: str) -> str:
         if not stripped:
             flush(); prev_len = 0
             continue
+        if stripped.lower() in _SECTIONS:
+            # A section heading must never be swallowed into the bullet above it,
+            # or everything after it is attributed to the wrong section.
+            flush(); out.append(stripped); prev_len = 0
+            continue
         m = _BULLET_RE.match(stripped)
         if m:
             flush()
@@ -278,10 +296,28 @@ def reflow_resume(raw: str) -> str:
 # So forms get one stored set of role descriptions, the most complete wording of
 # each job and project across all resume versions; the version only picks the file.
 _SECTIONS = {"education": "", "technical skills": "", "skills": "", "highlights of qualifications": "",
+             "teaching and leadership": "", "leadership": "", "interests": "", "awards": "",
              "experience": "experience", "work experience": "experience", "professional experience": "experience",
              "internship": "experience", "internships": "experience",
+             "industry and research experience": "experience", "industry experience": "experience",
              "projects": "projects", "project & research": "projects", "research & projects": "projects",
-             "projects & research": "projects", "research experience": "projects", "research": "projects"}
+             "projects & research": "projects", "research experience": "projects", "research": "projects",
+             "projects and research": "projects", "research and projects": "projects",
+             "ai and software projects": "projects", "software projects": "projects",
+             "graphics, vision, and interactive systems projects": "projects",
+             "selected projects": "projects", "personal projects": "projects"}
+
+# Lines a template puts between an entry's title and its date range: a bare
+# separator, a location, a team name. Used only to bridge that gap.
+_SEPARATOR_ONLY = re.compile(r"^[|/\\·•\-–—,:;\s]*$")
+
+
+# A multi-page resume repeats the role as "<role> (continued)" on the next page.
+_CONTINUED = re.compile(r"\(\s*cont(?:inued|\.)?\s*\)", re.I)
+
+
+def _bridges_to_dates(line: str) -> bool:
+    return bool(_SEPARATOR_ONLY.match(line)) or len(line) <= 48
 
 
 def resume_entries(text: str) -> list[dict[str, Any]]:
@@ -293,27 +329,50 @@ def resume_entries(text: str) -> list[dict[str, Any]]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     entries: list[dict[str, Any]] = []
     kind, current = "", None
-    for i, line in enumerate(lines):
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         if line.startswith("• "):
             if current is not None:
                 current["bullets"].append(line[2:].strip())
+            i += 1
             continue
         if line.lower() in _SECTIONS:
             kind, current = _SECTIONS[line.lower()], None
+            i += 1
             continue
+        heading = dates = None
+        consumed = 0
         inline = _DATE_RE.search(line)
-        following = _DATE_RE.match(lines[i + 1]) if i + 1 < len(lines) else None
         if inline and inline.start() > 0:
             heading, dates = line[:inline.start()], line[inline.start():]
-        elif following and len(lines[i + 1]) - following.end() <= 12 and not inline:
-            heading, dates = line, lines[i + 1]
-        else:
-            if not (inline and inline.start() == 0):   # a date line belongs to the heading above
+        elif not inline:
+            # The dates may be on the next line (LaTeX) or a few lines down with
+            # only a location / separator in between (also LaTeX, two columns).
+            for ahead in range(1, 5):
+                if i + ahead >= len(lines):
+                    break
+                nxt = lines[i + ahead]
+                match = _DATE_RE.match(nxt)
+                if match and len(nxt) - match.end() <= 12:
+                    heading, dates, consumed = line, nxt, ahead
+                    break
+                if nxt.startswith("• ") or nxt.lower() in _SECTIONS or not _bridges_to_dates(nxt):
+                    break
+        if dates is None:
+            # A bare date line belongs to the heading above. Metadata before an
+            # entry's first bullet (team, tech stack, links) must not end it;
+            # once bullets have started, any other line does -- except a
+            # "... (continued)" banner where a multi-page resume resumes a role.
+            if (not (inline and inline.start() == 0) and current is not None and current["bullets"]
+                    and not _CONTINUED.search(line)):
                 current = None
+            i += 1
             continue
         current = {"kind": kind, "heading": heading.strip(), "dates": dates.strip(), "bullets": []}
         if kind:
             entries.append(current)
+        i += consumed + 1
     return [e for e in entries if e["bullets"]]
 
 
@@ -328,8 +387,67 @@ def _resume_files() -> list[tuple[str, Path]]:
     return out
 
 
+def _entry_key(heading: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (heading or "").lower()).strip()
+
+
+def load_role_overrides() -> list[dict[str, Any]]:
+    """Hand-written role descriptions from setup/role_descriptions.json.
+
+    These are the authoritative text for application form fields. A resume PDF
+    trims bullets to fit one page and its layout is parsed heuristically, so the
+    user may keep fuller, cleaner wording here; it survives every resume rebuild.
+    """
+    if not ROLE_OVERRIDES_PATH.exists():
+        return []
+    try:
+        data = json.loads(ROLE_OVERRIDES_PATH.read_text())
+    except ValueError as e:
+        raise ValueError(f"{ROLE_OVERRIDES_PATH.name} is not valid JSON: {e}") from e
+    entries = data.get("entries") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        raise ValueError(f"{ROLE_OVERRIDES_PATH.name} must hold an 'entries' list")
+    cleaned: list[dict[str, Any]] = []
+    for raw in entries:
+        if not isinstance(raw, dict) or str(raw.get("heading", "")).startswith("_"):
+            continue
+        heading = str(raw.get("heading") or "").strip()
+        bullets = [str(b).strip() for b in (raw.get("bullets") or []) if str(b).strip()]
+        if not heading or not bullets:
+            continue
+        kind = raw.get("kind") if raw.get("kind") in ("experience", "projects") else "experience"
+        cleaned.append({"kind": kind, "heading": heading, "dates": str(raw.get("dates") or "").strip(),
+                        "bullets": bullets, "from": "manual"})
+    return cleaned
+
+
+def _merge_overrides(derived: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Hand-written entries replace the parsed entry with the same heading."""
+    overrides = {_entry_key(e["heading"]): e for e in load_role_overrides()}
+    if not overrides:
+        return derived
+    merged, used = [], set()
+    for entry in derived:
+        key = _entry_key(entry["heading"])
+        if key in overrides:
+            merged.append(overrides[key])
+            used.add(key)
+        else:
+            merged.append(entry)
+    merged += [e for key, e in overrides.items() if key not in used]
+    return sorted(merged, key=lambda e: e["kind"] != "experience")
+
+
 def role_descriptions(refresh: bool = False) -> list[dict[str, Any]]:
-    """The stored role descriptions: rebuilt only when a resume file changes."""
+    """The stored role descriptions: rebuilt only when a resume file changes.
+
+    Hand-written entries in setup/role_descriptions.json always win; the parsed
+    resume entries only fill in whatever they do not cover.
+    """
+    return _merge_overrides(_derived_role_descriptions(refresh=refresh))
+
+
+def _derived_role_descriptions(refresh: bool = False) -> list[dict[str, Any]]:
     files = _resume_files()
     fingerprint = [[p.name, p.stat().st_mtime, p.stat().st_size] for _, p in files]
     if not refresh and ROLES_PATH.exists():

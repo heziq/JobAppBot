@@ -115,6 +115,16 @@
       "_what": "SpeedyApply NEW_GRAD_USA.md; direct employer links. Source dates are estimates from table ages anchored to its latest commit. Eligibility still needs screening.",
       "enabled": true,
       "max_age_days": 3
+    },
+    "greenhouse": {
+      "_what": "Employer-hosted Greenhouse boards, read directly from the public boards-api. One request per board per scan. Unlike the aggregators these are the employer's own postings, so a closed role disappears instead of staying a dead link.",
+      "enabled": false,
+      "_boards": "Companies to watch. Each entry is {name, slug}; `slug` is the board token in the company's Greenhouse URL (job-boards.greenhouse.io/<slug>). A full boards-api or job-boards URL is accepted in place of the slug. Add \"enabled\": false to park one without deleting it. Keep the list short: every board is one request per scan.",
+      "boards": [
+        { "name": "Anthropic", "slug": "anthropic" }
+      ],
+      "_max_age_days": "Only postings first published within this many days. Boards move slower than the aggregators, so this can be wider than their 3.",
+      "max_age_days": 7
     }
   },
   "screening": {
@@ -146,7 +156,7 @@
     "require_categories": [
       "Software Development"
     ],
-    "_title_include": "Title must contain at least one of these (case-insensitive).",
+    "_title_include": "Title must match at least one of these (case- and accent-insensitive). A plain entry is a substring; a 2-3 letter one (sde, swe, llm, nlp) is matched as a whole word so it cannot hit inside a longer word. Prefix an entry with 'word:' to demand a whole word at any length, or 'stem:' to demand only that it starts a word. Use ' + ' (with spaces) between terms to require all of them in any order, e.g. 'machine learning + engineer'; 'C++' is left alone.",
     "title_include": [
       "software",
       "engineer",
@@ -155,7 +165,7 @@
       "swe",
       "programmer"
     ],
-    "_title_exclude": "Title must contain none of these.",
+    "_title_exclude": "Title must match none of these. Same matching as title_include, except ' + ' groups (a veto reads better as two entries). 'word:' matters most here: a bare 'intern' also rejects every 'Internal' and 'International' title, while 'word:Intern' rejects 'Operations Intern' and leaves those alone.",
     "title_exclude": [
       "senior",
       "sr.",

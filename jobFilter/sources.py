@@ -5,6 +5,8 @@
     startupjobs  startup.jobs role listings (HTML)
     applyguy     ApplyGuy/2027-New-Grad-Jobs public JSON feed
     speedyapply  SpeedyApply US new-grad Markdown table
+    greenhouse   employer-hosted Greenhouse boards, one request per company
+    ashby        employer-hosted Ashby boards, one request per company (bodies inline)
 
 Enabled/configured under the `sources` key of setup/search.json; see
 setup/search.template.json. `fetch_all()` merges everything into one list;
@@ -26,6 +28,8 @@ from jobFilter.http_client import requests
 from jobFilter.hiringcafe import HiringCafeClient
 from jobFilter.models import Job
 from jobFilter.applyguy import fetch_applyguy
+from jobFilter.ashby import fetch_ashby
+from jobFilter.greenhouse import fetch_greenhouse
 from jobFilter.speedyapply import fetch_speedyapply
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +41,10 @@ DEFAULT_SOURCES: dict[str, Any] = {
     "startupjobs": {"enabled": True, "roles": ["software-engineer"], "max_pages": 10, "max_age_days": 2},
     "applyguy": {"enabled": True, "max_age_days": 3},
     "speedyapply": {"enabled": True, "max_age_days": 3},
+    # Off until `boards` is filled in: with no boards the source is a no-op, and
+    # which employers to watch is a per-user choice, not a default.
+    "greenhouse": {"enabled": False, "boards": [], "max_age_days": 7},
+    "ashby": {"enabled": False, "boards": [], "max_age_days": 7},
 }
 
 # ----- shared helpers ---------------------------------------------------------
@@ -205,8 +213,15 @@ def sources_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def fetch_all(cfg: dict[str, Any], search_state: Optional[dict[str, Any]] = None, max_pages: int = 25,
-              log: Callable[[str], None] = lambda s: None) -> tuple[list[Job], dict[str, int], dict[str, str]]:
-    """Fetch every enabled source. Returns (jobs, counts per source, errors per source)."""
+              log: Callable[[str], None] = lambda s: None,
+              descriptions: Optional[dict[str, str]] = None) -> tuple[list[Job], dict[str, int], dict[str, str]]:
+    """Fetch every enabled source. Returns (jobs, counts per source, errors per source).
+
+    `descriptions`, when given, collects {job id: posting body} from sources
+    that return the body with the listing, so a later step can read it without
+    fetching it again. Ashby is the one such source: its API always sends the
+    body, and re-reading one means re-downloading that whole board.
+    """
     scfg = sources_config(cfg)
     jobs: list[Job] = []
     counts: dict[str, int] = {}
@@ -217,6 +232,8 @@ def fetch_all(cfg: dict[str, Any], search_state: Optional[dict[str, Any]] = None
         "startupjobs": fetch_startupjobs,
         "applyguy": fetch_applyguy,
         "speedyapply": fetch_speedyapply,
+        "greenhouse": lambda c: fetch_greenhouse(c, log=log),
+        "ashby": lambda c: fetch_ashby(c, log=log, descriptions=descriptions),
     }
     for name, run in runners.items():
         c = scfg.get(name, {})

@@ -117,7 +117,14 @@ class GuidanceTests(unittest.TestCase):
                 self.assertIn(record['school'], prompt)
             self.assertIn('Known answer', prompt)
             self.assertIn('2027-03-22', prompt)
-            self.assertLess(len(prompt) - len(resume) - len(roles), 12000)
+            # Backstop on the fixed scaffolding, not the point of this test: the
+            # invariants that matter are the two assertions either side of it --
+            # no archive text in the prompt, and a byte-identical prompt after
+            # more lessons are appended. Raised 12000 -> 12500 on 2026-11-24 for
+            # a reviewed core-workflow clause (an "Add" control with no fields
+            # under it is a record to add). Platform mechanics belong in the lazy
+            # guides; only add to the core when every platform needs it.
+            self.assertLess(len(prompt) - len(resume) - len(roles), 12500)
             guidance.append_lessons(self.skill, ['New unrelated site rule ' * 200], 'Unrelated')
             self.assertEqual(apply_engine.build_prompt(app, self.root), prompt)
 

@@ -99,6 +99,10 @@
   .app-group-body[hidden] { display:none; }
   .app-group-body > .app:last-child { border-bottom:0; }
   .settings-fields label.chk { flex-direction:row; align-self:center; }
+  /* Sits bottom-left so it never covers the application activity box on the right. */
+  .selection-bar { position:fixed; left:20px; bottom:20px; z-index:5; display:flex; align-items:center; flex-wrap:wrap; gap:12px; max-width:min(560px, calc(100vw - 40px)); border:1px solid var(--accent); border-radius:12px; padding:12px 16px; background:var(--bg); box-shadow:0 8px 30px #0003; }
+  .selection-bar[hidden] { display:none; }
+  .row-select { flex-shrink:0; margin-right:2px; cursor:pointer; }
   .application-activity { position:fixed; right:20px; bottom:20px; z-index:5; width:min(360px, calc(100vw - 32px)); display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
   .activity-toggle { display:flex; align-items:center; gap:10px; border:1px solid var(--accent); border-radius:999px; padding:12px 18px; background:var(--bg); color:var(--fg); font:inherit; font-weight:600; cursor:pointer; box-shadow:0 4px 20px #0002; }
   .activity-spinner { width:16px; height:16px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:activity-spin .8s linear infinite; flex-shrink:0; }
@@ -119,6 +123,8 @@
   .icon-btn:hover { border-color:var(--accent); color:var(--accent); }
   .icon-btn.is-unsuitable { color:var(--badfg); background:var(--bad); }
   .icon-btn.is-submitted { color:var(--okfg); background:var(--ok); border-color:var(--okfg); opacity:1; }
+  .icon-btn.is-rejected { color:var(--badfg); background:var(--bad); border-color:var(--badfg); opacity:1; }
+  .icon-btn.is-skipped { color:var(--muted); border-color:var(--muted); opacity:1; }
   .icon-btn.is-unavailable { color:var(--warnfg); background:var(--warn); border-color:var(--warnfg); }
   .icon-action { position:relative; display:inline-flex; }
   .icon-hint { visibility:hidden; position:absolute; right:0; top:calc(100% + 7px); z-index:6; width:max-content; max-width:min(260px, calc(100vw - 40px)); padding:7px 10px; border:1px solid var(--line); border-radius:7px; background:var(--fg); color:var(--bg); box-shadow:0 3px 12px #0003; font-size:12px; font-weight:400; white-space:normal; pointer-events:none; }

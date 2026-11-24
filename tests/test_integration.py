@@ -28,6 +28,7 @@ def result(status="review_ready"):
 
 VERDICT = {"statement": "no_sponsorship", "requires_citizenship": False, "company_verdict": "unknown",
            "company_evidence": [], "verdict": "unlikely", "new_grad_fit": True, "fit_score": 2,
+           "intern_return_requirement": "not_an_internship",
            "summary": "No sponsorship.", "evidence": ["We cannot sponsor visas."], "sources": []}
 
 
@@ -328,7 +329,9 @@ class IntegrationTests(unittest.TestCase):
     def test_screening_routes_and_model_labels(self):
         for provider in ("claude", "codex"):
             cfg = screen.screening_config({"screening": {"provider": provider}})
-            with patch.object(screen, "fetch_description", return_value="We cannot sponsor visas."), patch.object(screen, "run_claude", return_value=(VERDICT, {})) as cc, patch.object(screen, "run_codex", return_value=(VERDICT, {})) as gpt:
+            # Deliberately says nothing about sponsorship: this case is about
+            # which provider runs, and a stated refusal is answered without one.
+            with patch.object(screen, "fetch_description", return_value="Backend role, Python and Postgres."), patch.object(screen, "run_claude", return_value=(VERDICT, {})) as cc, patch.object(screen, "run_codex", return_value=(VERDICT, {})) as gpt:
                 out = screen.screen_job(self.store, self.store.get("test"), cfg)
                 self.assertEqual(out["status"], "ok")
                 self.assertEqual(out["model"], "sonnet" if provider == "claude" else "codex/default")

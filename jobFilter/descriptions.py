@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
-from typing import Any
+from typing import Any, Optional
 
 from jobFilter.http_client import requests
 
@@ -86,6 +86,78 @@ def fetch_description(row: dict[str, Any]) -> str:
     return ""
 
 
+
+
+# ----- stated sponsorship refusals -------------------------------------------------
+# Phrase list ported from career-ops scan.mjs `visaRefusalPhrases()` (MIT), which
+# measured it over 7,168 public Greenhouse/Ashby/Lever postings on 2026-11-19.
+#
+# This only catches a posting that SAYS it will not sponsor. It can never catch
+# the other reason a screening lands on "unlikely" -- a company with no H-1B
+# filing history -- because that needs a web search, not a regex. Backtested
+# against this install's own first 40 screenings it matched 2, so treat it as a
+# small saving on an explicit subset, not as a replacement for screening.
+def _refusal_phrases() -> tuple[str, ...]:
+    sponsorship = ("sponsorship", "visa sponsorship", "work visa sponsorship")
+    any_sponsorship = sponsorship + ("company sponsorship", "employer sponsorship")
+    cross = lambda prefixes, objects: [f"{p} {o}" for p in prefixes for o in objects]
+    phrases = cross(
+        [f"{neg} {verb}"
+         for neg in ("not", "n't", "unable to", "not able to", "not currently able to", "not in a position to")
+         for verb in ("offer", "provide", "support", "sponsor")],
+        sponsorship)
+    # "work authorization that does not require sponsorship", "must not require
+    # visa sponsorship now or in the future". Only in these framings: a bare
+    # "not require sponsorship" would also drop "we sponsor visas and welcome
+    # those who do not require sponsorship", which is an offer, not a refusal.
+    phrases += cross(
+        [f"{a} that does not require" for a in ("authorization", "authorisation")]
+        + [f"{a} that doesn't require" for a in ("authorization", "authorisation")]
+        + ["must not require", "must not now or in the future require",
+           "does not require", "will not require"],
+        any_sponsorship)
+    phrases += cross(("without requiring", "without needing", "without the need for"), any_sponsorship)
+    phrases += [
+        "without visa sponsorship", "without sponsorship",
+        "not eligible for sponsorship", "not eligible for visa sponsorship",
+        "ineligible for sponsorship", "ineligible for visa sponsorship",
+        "sponsorship is not offered", "sponsorship not offered",
+        "sponsorship is not provided", "sponsorship not provided",
+        "sponsorship is not available", "sponsorship not available",
+        "sponsorship will not be offered", "sponsorship will not be provided",
+        "sponsorship cannot be offered", "sponsorship cannot be provided",
+        "not sponsoring for work authorization", "not sponsoring work visas",
+        "cannot sponsor", "can not sponsor", "unable to sponsor", "do not sponsor",
+        "does not sponsor", "will not sponsor", "no visa sponsorship",
+    ]
+    return tuple(dict.fromkeys(phrases))
+
+
+REFUSAL_PHRASES = _refusal_phrases()
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?;])\s+|\n+")
+
+
+def _fold(text: str) -> str:
+    """Lowercase, straighten curly apostrophes so "n't" covers "can't"/"won't"."""
+    return re.sub(r"\s+", " ", (text or "").replace("’", "'").replace("‘", "'").lower())
+
+
+def stated_refusal(text: str) -> Optional[str]:
+    """The sentence in which the posting states it will not sponsor, or None.
+
+    The matched SENTENCE is returned rather than a boolean so the decision can
+    be shown as evidence and checked by hand: this is used to skip a paid
+    screening, and an unexplained rejection is worse than the money it saves.
+    """
+    if not text:
+        return None
+    for sentence in _SENTENCE_SPLIT.split(text):
+        folded = _fold(sentence)
+        if not folded or "sponsor" not in folded:
+            continue
+        if any(p in folded for p in REFUSAL_PHRASES):
+            return " ".join(sentence.split())[:300]
+    return None
 
 
 # ----- years-of-experience inference -----------------------------------------------

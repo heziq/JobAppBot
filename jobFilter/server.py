@@ -4,7 +4,7 @@
 
 Jobs:          GET /api/dates, /api/jobs?since=24|date=YYYY-MM-DD, /api/job?id=, /api/runs
 Scanning:      GET/POST /api/scan (status / start with saved settings)
-Screening:     POST /api/screen {job_id}  (background; /api/jobs rows carry `screening`)
+Screening:     POST /api/screen {job_id}, /api/screen-batch {job_ids} (background; /api/jobs rows carry `screening`)
 Applications:  GET /api/engine, /api/applications?status=, /api/application?id=, /api/log?id=&lines=
                POST /api/applications/queue {job_id}, /status {job_id,status,note}, /retry {job_id},
                     /stop {job_id}, /delete {job_id}, /unavailable {job_id,unavailable,note}
@@ -130,13 +130,19 @@ def make_handler(store: Store, config_path: Path | None = None):
                     a = store.get_application(q.get("id", ""))
                     self._json({"lines": _tail(a.get("log_path") if a else None, int(q.get("lines", 200)))})
                 elif p == "/api/profile":
-                    self._json({"profile": prof.load_profile(), "status": prof.status()})
+                    # Raw, so the editor round-trips the file instead of saving
+                    # back a copy with every `_` note stripped out.
+                    self._json({"profile": prof.load_profile_raw(), "status": prof.status()})
                 elif p == "/api/settings":
                     self._json(apply_engine.effective_settings())
                 elif p == "/api/screening-settings":
                     from jobFilter import screen
                     from jobFilter.codex import find_codex
+                    # This install's own measured cost, so the UI can price the
+                    # per-scan cap instead of quoting a number from nowhere.
+                    cost = store.screening_cost_per_job()
                     self._json({"settings": screen.screening_config(json.loads(config_path.read_text())),
+                                "cost_per_job": cost["average"], "cost_samples": cost["samples"],
                                 "codex_found": bool(find_codex()), "claude_found": bool(apply_engine.find_claude())})
                 elif p == "/api/answers":
                     self._json(prof.load_answers())
@@ -191,6 +197,49 @@ def make_handler(store: Store, config_path: Path | None = None):
                             screening_jobs.discard(row["id"])
                         raise
                     self._json({"started": True})
+                elif p == "/api/screen-batch":
+                    # Several jobs under one request so screen_batch can group
+                    # them by company: the first job of a company fills the
+                    # sponsorship cache and the rest reuse it, which measured
+                    # $0.066 against $0.120 on this install.
+                    from jobFilter import screen
+                    ids = b.get("job_ids")
+                    if not isinstance(ids, list) or not ids:
+                        return self._json({"error": "job_ids must be a non-empty list"}, 400)
+                    if len(ids) > 200:
+                        return self._json({"error": "at most 200 jobs at a time"}, 400)
+                    scfg = screen.screening_config(json.loads(config_path.read_text()))
+                    rows, unknown = [], []
+                    for job_id in dict.fromkeys(i for i in ids if isinstance(i, str)):
+                        row = store.get(job_id)
+                        (rows.append(row) if row else unknown.append(job_id))
+                    with screening_lock:
+                        # A job already being screened is skipped rather than
+                        # screened twice; the caller is told which.
+                        busy = [r["id"] for r in rows if r["id"] in screening_jobs]
+                        rows = [r for r in rows if r["id"] not in screening_jobs]
+                        screening_jobs.update(r["id"] for r in rows)
+                    if not rows:
+                        return self._json({"started": 0, "busy": busy, "unknown": unknown})
+                    def _go_batch(batch=rows):
+                        local = None
+                        try:
+                            local = Store(store.path)
+                            screen.screen_batch(local, batch, scfg)
+                        except Exception:
+                            pass    # per-job failures are already saved by screen_batch
+                        finally:
+                            if local:
+                                local.close()
+                            with screening_lock:
+                                screening_jobs.difference_update(r["id"] for r in batch)
+                    try:
+                        threading.Thread(target=_go_batch, daemon=True).start()
+                    except Exception:
+                        with screening_lock:
+                            screening_jobs.difference_update(r["id"] for r in rows)
+                        raise
+                    self._json({"started": len(rows), "busy": busy, "unknown": unknown})
                 elif p == "/api/applications/queue":
                     if not store.get(b.get("job_id", "")):
                         return self._json({"error": "unknown job"}, 404)

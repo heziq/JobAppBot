@@ -8,8 +8,8 @@ async function api(path, body) {
   return r.json();
 }
 const VIA_LABEL = { hiringcafe: 'hiring.cafe', simplify: 'Simplify', startupjobs: 'startup.jobs', applyguy: 'ApplyGuy', speedyapply: 'SpeedyApply' };
-const STATUS_CLASS = { queued: '', running: 'warn', review_ready: 'ok', needs_answer: 'warn', needs_cover_letter: 'warn', needs_login: 'warn', captcha: 'warn', already_applied: '', unavailable: '', failed: 'bad', submitted: 'ok', skipped: '' };
-const STATUS_LABEL = { queued: 'queued', running: 'working', review_ready: 'ready to submit', needs_answer: 'needs your answer', needs_cover_letter: 'writing cover letter', needs_login: 'needs login / code', captcha: 'CAPTCHA', already_applied: 'already applied', unavailable: 'unavailable', failed: 'failed', submitted: 'submitted', skipped: 'skipped' };
+const STATUS_CLASS = { queued: '', running: 'warn', review_ready: 'ok', needs_answer: 'warn', needs_cover_letter: 'warn', needs_login: 'warn', captcha: 'warn', already_applied: '', unavailable: '', failed: 'bad', submitted: 'ok', rejected: 'bad', skipped: '' };
+const STATUS_LABEL = { queued: 'queued', running: 'working', review_ready: 'ready to submit', needs_answer: 'needs your answer', needs_cover_letter: 'writing cover letter', needs_login: 'needs login / code', captcha: 'CAPTCHA', already_applied: 'already applied', unavailable: 'unavailable', failed: 'failed', submitted: 'submitted', rejected: 'rejected', skipped: 'not submitted' };
 const CLOSED_STATUSES = ['unavailable', 'already_applied'];
 const badge = st => st ? `<span class="badge ${STATUS_CLASS[st] || ''}">${esc(STATUS_LABEL[st] || st)}</span>` : '';
 const SP_LABEL = { likely: 'sponsor: likely', unlikely: 'sponsor: unlikely', unknown: 'sponsor: unknown' };
@@ -39,6 +39,8 @@ const ROW_ICONS = {
   submitted:'<circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/>',
   unsuitable:'<circle cx="12" cy="12" r="9"/><path d="m6 6 12 12"/>',
   unavailable:'<circle cx="12" cy="12" r="9"/><path d="M7 12h10"/>',
+  rejected:'<circle cx="12" cy="12" r="9"/><path d="m8.5 8.5 7 7m0-7-7 7"/>',
+  notsubmitted:'<circle cx="12" cy="12" r="9" stroke-dasharray="3 2.5"/>',
   tags:'<path d="M3 3h8l10 10-8 8L3 11Z"/><circle cx="7.5" cy="7.5" r="1"/>'
 };
 const icon = key => `<svg viewBox="0 0 24 24" aria-hidden="true">${ROW_ICONS[key]}</svg>`;
@@ -52,18 +54,26 @@ function screenButton(r, compact = false) {
 function rowActions(r) {
   const status = r.app_status || r.status;
   const unsuitable = r.review?.state === 'not_suitable';
-  const submittedText = status === 'submitted' ? 'Already submitted' : ['queued','running'].includes(status) ? 'Wait for the active attempt to finish' : 'Mark submitted';
+  // One button cycles the outcome you record by hand:
+  //   (none) -> submitted -> rejected -> not submitted -> submitted -> ...
+  // 'not submitted' is the existing `skipped` state: you decided not to apply.
+  // An agent-filled application awaiting your review is `review_ready`, which the
+  // engine sets on its own and this button never touches.
+  const submittedText = status === 'submitted' ? 'Submitted · click to mark rejected'
+    : status === 'rejected' ? 'Rejected · click to mark not submitted'
+    : status === 'skipped' ? 'Not submitted · click to mark submitted'
+    : ['queued','running'].includes(status) ? 'Wait for the active attempt to finish' : 'Mark submitted';
   const unsuitableText = unsuitable ? 'Clear not suitable → Needs review' : 'Mark not suitable';
   const closed = CLOSED_STATUSES.includes(status);
   const unavailableText = closed ? `${STATUS_LABEL[status][0].toUpperCase() + STATUS_LABEL[status].slice(1)} · click to clear`
     : ['queued','running'].includes(status) ? 'Stop the attempt and mark the job unavailable' : 'Mark unavailable (closed or already applied)';
   const pending = !!r.review?.pending;
-  const pendingDisabled = !pending && ['queued','running','submitted',...CLOSED_STATUSES].includes(status);
+  const pendingDisabled = !pending && ['queued','running','submitted','rejected',...CLOSED_STATUSES].includes(status);
   const pendingText = pending ? 'Clear pending' : pendingDisabled ? 'Pending is for unfinished, inactive jobs' : 'Mark pending · waiting for referral / apply later';
   return `<div class="row-actions">
     ${hint(pendingText, `<button class="btn icon-btn ${pending ? 'is-pending' : ''}" data-act="toggle-pending" aria-pressed="${pending}" aria-label="${pendingText}" ${pendingDisabled ? 'disabled' : ''}>${icon('pending')}</button>`)}
-    ${hint(submittedText, `<button class="btn icon-btn ${status === 'submitted' ? 'is-submitted' : ''}" data-act="mark-submitted" aria-label="${submittedText}" ${['submitted','queued','running'].includes(status) ? 'disabled' : ''}>${icon('submitted')}</button>`)}
-    ${hint(unavailableText, `<button class="btn icon-btn ${closed ? 'is-unavailable' : ''}" data-act="toggle-unavailable" aria-pressed="${closed}" aria-label="${unavailableText}" ${status === 'submitted' ? 'disabled' : ''}>${icon('unavailable')}</button>`)}
+    ${hint(submittedText, `<button class="btn icon-btn ${status === 'submitted' ? 'is-submitted' : status === 'rejected' ? 'is-rejected' : status === 'skipped' ? 'is-skipped' : ''}" data-act="mark-submitted" aria-label="${submittedText}" ${['queued','running'].includes(status) ? 'disabled' : ''}>${icon(status === 'rejected' ? 'rejected' : status === 'skipped' ? 'notsubmitted' : 'submitted')}</button>`)}
+    ${hint(unavailableText, `<button class="btn icon-btn ${closed ? 'is-unavailable' : ''}" data-act="toggle-unavailable" aria-pressed="${closed}" aria-label="${unavailableText}" ${['submitted','rejected'].includes(status) ? 'disabled' : ''}>${icon('unavailable')}</button>`)}
     ${hint(unsuitableText, `<button class="btn icon-btn ${unsuitable ? 'is-unsuitable' : ''}" data-act="toggle-suitability" aria-pressed="${unsuitable}" aria-label="${unsuitable ? 'Clear not suitable mark' : 'Mark not suitable'}">${icon('unsuitable')}</button>`)}
     ${hint('Manage tags and suitability', `<button class="btn icon-btn" data-act="manage-tags" aria-label="Manage tags">${icon('tags')}</button>`)}
   </div>`;
@@ -87,8 +97,11 @@ async function handleRowAction(act, id) {
         const row = (tab === 'jobs' ? rows : apps).find(r => (r.id || r.job_id) === id);
         result = await api('/api/jobs/review', {job_id:id, pending:!row?.review?.pending});
       } else if (kind === 'mark-submitted') {
+        const row = (tab === 'jobs' ? rows : apps).find(r => (r.id || r.job_id) === id);
+        const current = row?.app_status || row?.status;
+        const next = current === 'submitted' ? 'rejected' : current === 'rejected' ? 'skipped' : 'submitted';
         const note = act.closest('.app')?.querySelector('[data-note]')?.value;
-        result = await api('/api/applications/status', {job_id:id, status:'submitted', ...(note === undefined ? {} : {note})});
+        result = await api('/api/applications/status', {job_id:id, status:next, ...(note === undefined ? {} : {note})});
       } else if (kind === 'toggle-unavailable') {
         const row = (tab === 'jobs' ? rows : apps).find(r => (r.id || r.job_id) === id);
         const status = row?.app_status || row?.status, closed = CLOSED_STATUSES.includes(status);
@@ -244,11 +257,53 @@ function duplicateBadge(r) {
   const label = representative.match_type === 'exact' ? (earlier.length ? 'seen before' : 'also listed') : 'Possible repeat';
   return `<span class="badge ${applied ? 'warn' : ''}" title="${esc(title)}">${label} on ${esc(via)}${applied ? ' · ' + esc(STATUS_LABEL[applied.app_status] || applied.app_status) : ''}</span>`;
 }
+// Batch screening. Only unscreened jobs can be selected: screening is a paid
+// call, and re-running one that already has a verdict is the costly mistake a
+// checkbox makes easy. Re-screening stays a deliberate per-row click.
+const selected = new Set();
+const selectable = r => !r.screening && !r.screening_running;
+function selectBox(r) {
+  if (!selectable(r)) return '';
+  return `<input type="checkbox" class="row-select" data-select="${esc(r.id)}" ${selected.has(r.id) ? 'checked' : ''}
+          aria-label="Select for screening" onclick="event.stopPropagation()">`;
+}
+function renderSelectionBar() {
+  const bar = $('#selectionBar');
+  if (!bar) return;
+  const n = selected.size;
+  bar.hidden = !n;
+  if (!n) return;
+  const per = screeningCostPerJob;
+  // Same-company jobs share one sponsorship lookup, so the estimate is an
+  // upper bound; say so rather than quoting a number that will read as wrong.
+  const cost = per ? ` · up to about $${(n * per).toFixed(2)}` : '';
+  bar.innerHTML = `<span><strong>${n}</strong> selected${cost}</span>
+    <button class="btn primary" id="screenSelected">Screen ${n} with ${providerName(screeningProvider === 'codex' ? 'codex-playwright' : 'claude-chrome')}</button>
+    <button class="btn" id="clearSelected">Clear</button>
+    <span id="selectionMsg" class="status-message" role="status"></span>`;
+  $('#screenSelected').onclick = screenSelected;
+  $('#clearSelected').onclick = () => { selected.clear(); render(); };
+}
+async function screenSelected() {
+  const ids = [...selected];
+  const button = $('#screenSelected');
+  button.disabled = true;
+  try {
+    const r = await api('/api/screen-batch', { job_ids: ids });
+    if (r.error) throw new Error(r.error);
+    selected.clear();
+    settingMessage('#selectionMsg', `Screening ${r.started} job${r.started === 1 ? '' : 's'}…`);
+    await load();
+  } catch (e) {
+    settingMessage('#selectionMsg', 'Could not start: ' + e.message, true);
+    button.disabled = false;
+  }
+}
 function rowHtml(r) {
   const j = r.job, link = j.apply_url || r.hc_url;
   return `<div class="job" data-id="${esc(r.id)}">
       <div class="row">
-        <div class="title">${screenButton(r, true)}<span class="chev" aria-hidden="true">&#9654;</span><a href="${esc(link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(j.title)}</a>
+        <div class="title">${selectBox(r)}${screenButton(r, true)}<span class="chev" aria-hidden="true">&#9654;</span><a href="${esc(link)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(j.title)}</a>
           ${isRecent(r.first_seen) && !earlierCopies(r).length ? '<span class="badge warn">new</span>' : ''}${duplicateBadge(r)}${(srcFilter === 'all') ? `<span class="badge" title="found via ${esc(j.via || 'hiringcafe')}">${esc(VIA_LABEL[j.via] || 'hiring.cafe')}</span>` : ''}${reviewBadges(r)}${badge(r.app_status)}</div>
         <div class="muted" title="${esc(j.company)}">${esc(j.company)}</div>
         <div class="muted" title="${esc(j.location)}">${esc(j.location || '')}</div>
@@ -307,6 +362,11 @@ function render() {
   const listingSets = listingGroups(shown).sort((a, b) => compare(a[0], b[0]));
   $('#count').textContent = (listingSets.length === shown.length ? `${shown.length} job${shown.length === 1 ? '' : 's'}`
     : `${listingSets.length} job group${listingSets.length === 1 ? '' : 's'} · ${shown.length} listings`) + (srcFilter !== 'all' || q ? ` (of ${rows.length})` : '');
+  // Drop selections for rows that are gone or have since been screened, so the
+  // count and the estimate never describe jobs the batch would not screen.
+  const visible = new Set(shown.filter(selectable).map(r => r.id));
+  for (const id of [...selected]) if (!visible.has(id)) selected.delete(id);
+  renderSelectionBar();
   if (!shown.length) { $('#list').innerHTML = mode === 'pending' ? '<div class="empty">No pending jobs match these filters. Use the clock button on a job to save it for a referral or later.</div>' : '<div class="empty">Nothing here. Run <code>jobfilter run</code> to fetch.</div>'; return; }
   const groups = new Map();
   for (const listingSet of listingSets) { const k = groupKey(listingSet[0]); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(listingSet); }
@@ -359,6 +419,14 @@ $('#hideUnlikely').addEventListener('change', () => { try { localStorage.setItem
 try { $('#hideUnlikely').checked = localStorage.getItem('jf.hideUnlikely') === '1'; } catch (_) {}
 $('#list').addEventListener('click', async e => {
   const job = e.target.closest('.job'); if (!job) return;
+  const box = e.target.closest('[data-select]');
+  if (box) {
+    // Toggle without a full re-render: redrawing the list here would collapse
+    // whatever the user has expanded while picking jobs.
+    box.checked ? selected.add(box.dataset.select) : selected.delete(box.dataset.select);
+    renderSelectionBar();
+    return;
+  }
   const act = e.target.closest('[data-act]');
   if (act) {
     if (await handleRowAction(act, job.dataset.id)) return;
@@ -457,19 +525,20 @@ const expandedApps = new Set(), applicationDrafts = new Map();
 const savingAnswers = new Set();
 const workingApplication = a => ['running', 'queued'].includes(a.status);
 // Terminal: the attempt is over. Everything else stays pinned at the top of Applications.
-const TERMINAL_STATUSES = ['submitted', 'already_applied', 'unavailable', 'failed', 'skipped'];
+const TERMINAL_STATUSES = ['submitted', 'rejected', 'already_applied', 'unavailable', 'failed', 'skipped'];
 const ATTENTION_STATUSES = ['review_ready', 'needs_answer', 'needs_login', 'captcha'];
 const attentionApplication = a => ATTENTION_STATUSES.includes(a.status);
 // Pinned until the attempt reaches a terminal state, whatever the job's suitability.
 const activeApplication = a => !TERMINAL_STATUSES.includes(a.status);
-const APP_GROUPS = [['active', 'Active'], ['failed', 'Failed'], ['submitted', 'Submitted'],
-  ['already_applied', 'Already applied'], ['unavailable', 'Unavailable'], ['skipped', 'Skipped']];
+const APP_GROUPS = [['active', 'Active'], ['failed', 'Failed'], ['submitted', 'Submitted'], ['rejected', 'Rejected'],
+  ['already_applied', 'Already applied'], ['unavailable', 'Unavailable'], ['skipped', 'Not submitted']];
 const applicationGroup = a => activeApplication(a) ? 'active' : a.status;
 const appGroupChoices = new Map();
 const appGroupOpen = key => appGroupChoices.get(key) ?? (key === 'active');
 const appDetailsVisible = a => expandedApps.has(a.job_id) && appGroupOpen(applicationGroup(a));
 const activePriority = a => a.status === 'running' ? 0 : a.status === 'queued' ? 1 : activeApplication(a) ? 2 : 3;
 let applicationEngine = 'claude-chrome', screeningProvider = 'claude', screeningEnabled = true;
+let screeningCostPerJob = null;   // this install's measured average; null until something is screened
 function updateAttention(count) { $('#appsBadge').hidden = !count; $('#appsBadge').textContent = count; }
 const providerName = engine => ({'manual': 'Manually tracked', 'codex-playwright': 'ChatGPT / Codex', 'codex': 'ChatGPT / Codex'}[engine] || 'Claude Code');
 function setActivityOpen(open) {
@@ -531,6 +600,7 @@ async function refreshProviders() {
     launchModels = st.codex_models || [];
     updateAttention(apps.filter(attentionApplication).length);
     if (sc.settings) { screeningProvider = sc.settings.provider; screeningEnabled = sc.settings.enabled; }
+    if ('cost_per_job' in sc) screeningCostPerJob = sc.cost_per_job;
     const screening = sc.settings ? (sc.settings.enabled ? providerName(sc.settings.provider) : 'Paused') : 'Unavailable';
     $('#providerSummary').innerHTML = `<span>Screening: <strong>${screening}</strong></span><span>Applications: <strong>${providerName(applicationEngine)}</strong></span><a href="#settings">Change AI providers</a>`;
     if (tab === 'jobs') render();
@@ -588,12 +658,21 @@ function renderScreeningSettings(sc) {
     ${providerCards('screeningProvider', saved.provider, false)}
     <label><input id="screenEnabled" type="checkbox" ${saved.enabled ? 'checked' : ''}> Screen new jobs automatically after each scan</label>
     <div id="screeningGuide" class="provider-guide"></div>
+    <div class="settings-fields"><label>Jobs per scan<input id="screenPerRun" type="number" min="1" max="200" value="${saved.max_per_run}"><small id="screenPerRunCost" class="help"></small></label></div>
     <div class="settings-fields"><label id="screenClaudeField">Claude screening model<input id="screenClaudeModel" type="text" value="${esc(saved.model)}"></label>
     <div id="screenCodexField">${thinkingSelect('screenThinking', saved.codex_reasoning_effort)}<label>GPT screening model (optional)<input id="screenCodexModel" type="text" placeholder="Use Codex default" value="${esc(saved.codex_model)}"></label></div></div>
     <div class="actions"><button class="btn primary" id="saveScreening">Save screening provider</button><span id="screeningMsg" class="status-message" role="status"></span></div>`;
   function preview() {
     const gpt = $('input[name="screeningProvider"]:checked').value === 'codex';
     $('#screenClaudeField').hidden = gpt; $('#screenCodexField').hidden = !gpt;
+    // Each screened job is one billed model call, so the cap is a spend cap.
+    // The per-job figure is this install's own measured average, not a quote.
+    const n = Number($('#screenPerRun').value) || 0;
+    const per = sc.cost_per_job, on = $('#screenEnabled').checked;
+    $('#screenPerRun').closest('label').hidden = !on;
+    $('#screenPerRunCost').textContent = !per
+      ? 'Cap per scan; whatever is left waits for the next one.'
+      : `Cap per scan; the rest waits for the next one. About $${(n * per).toFixed(2)} per scan at your measured $${per.toFixed(3)}/job (${sc.cost_samples} screened so far).`;
     $('#screeningGuide').innerHTML = gpt ? `<strong>Automatic screening with your ChatGPT subscription</strong><p>${sc.codex_found ? 'Codex CLI is installed.' : 'Install Codex CLI first.'} Sign in with ChatGPT using <code>codex login</code>. No API key is needed.</p><p>Save to use GPT for the next scan and “Screen now”. Existing scores stay unchanged until you screen those jobs again.</p>` : `<strong>Automatic screening with your Claude subscription</strong><p>${sc.claude_found ? 'Claude Code is installed.' : 'Install Claude Code and sign in first.'} Save to use Claude for the next scan and “Screen now”.</p>`;
   }
   preview();
@@ -601,7 +680,7 @@ function renderScreeningSettings(sc) {
   $('#saveScreening').onclick = async () => {
     const button = $('#saveScreening'); button.disabled = true;
     try {
-      const r = await api('/api/screening-settings', {provider: $('input[name="screeningProvider"]:checked').value, enabled: $('#screenEnabled').checked, model: $('#screenClaudeModel').value, codex_model: $('#screenCodexModel').value, codex_reasoning_effort: $('#screenThinking').value});
+      const r = await api('/api/screening-settings', {provider: $('input[name="screeningProvider"]:checked').value, enabled: $('#screenEnabled').checked, max_per_run: $('#screenPerRun').value, model: $('#screenClaudeModel').value, codex_model: $('#screenCodexModel').value, codex_reasoning_effort: $('#screenThinking').value});
       if (r.error) throw new Error(r.error);
       $('#savedScreenProvider').textContent = providerName(r.provider);
       settingMessage('#screeningMsg', 'Saved. Applies to the next scan and manual screenings.');

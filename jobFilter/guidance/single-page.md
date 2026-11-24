@@ -1,2 +1,3 @@
 # Greenhouse (`boards.greenhouse.io`, `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby (`jobs.ashbyhq.com`)
 - One page, no account. Resume upload is a plain file input. Custom questions are labelled plainly; EEO section at the bottom. The last button is Submit: stop before it.
+- Where the form carries Experience/Education as repeatable cards, they start as a heading plus an "Add"/"+ Add" control with no fields. The inputs appear only after it is clicked: click once per record, fill the card, confirm it if it has its own button, re-read the saved card, then click again for the next. A section with no visible inputs is a section still to fill, never one with nothing to ask for.

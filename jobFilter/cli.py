@@ -109,7 +109,11 @@ def _run(args, report) -> int:
         cfg["sources"] = {"hiringcafe": True, "simplify": False, "startupjobs": False, "applyguy": False, "speedyapply": False}
     log(f"[{run_id}] fetching from {', '.join(n for n, c in sources.sources_config(cfg).items() if c.get('enabled'))}")
     report(message='Fetching jobs from enabled sources…')
-    jobs, counts, errors = sources.fetch_all(cfg, search_state=search_state, max_pages=args.max_pages, log=log)
+    # Bodies that came with the listing (Ashby sends them inline), so the
+    # experience rule below does not re-download a whole board per posting.
+    inline_descriptions: dict[str, str] = {}
+    jobs, counts, errors = sources.fetch_all(cfg, search_state=search_state, max_pages=args.max_pages, log=log,
+                                             descriptions=inline_descriptions)
     report(source_errors=errors, fetched=len(jobs), message='Checking job filters…')
     if not jobs and errors:
         log("every source failed")
@@ -120,7 +124,9 @@ def _run(args, report) -> int:
     if rules:  # sources without experience metadata: read the posting and re-check the experience rule
         from jobFilter.descriptions import fetch_description
         from jobFilter.filters import enrich_experience
-        kept, more = enrich_experience(kept, rules, fetch_description, log=log)
+        def read_description(row, _inline=inline_descriptions):
+            return _inline.get(row["id"]) or fetch_description(row)
+        kept, more = enrich_experience(kept, rules, read_description, log=log)
         rejected += more
     log(f"{len(jobs)} fetched, {len(kept)} kept, {len(rejected)} rejected")
     for reason, n in Counter(r for _, r in rejected).most_common():

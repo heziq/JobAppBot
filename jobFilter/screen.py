@@ -41,6 +41,8 @@ DEFAULT_SCREENING: dict[str, Any] = {
     "concurrency": 3,
     "company_cache_days": 30,
     "max_turns": 14,
+    # False always pays for the model, even when the posting states a refusal.
+    "refusal_skips_llm": True,
 }
 
 SCHEMA = {
@@ -55,12 +57,15 @@ SCHEMA = {
         "verdict": {"type": "string", "enum": ["likely", "unlikely", "unknown"],
                     "description": "Overall: will THIS job sponsor? no_sponsorship or requires_citizenship => unlikely; sponsors => likely; else the company verdict."},
         "new_grad_fit": {"type": "boolean", "description": "0-1 years of experience or a recent degree is enough to qualify."},
+        "intern_return_requirement": {"type": "string", "enum": ["not_an_internship", "required", "not_required", "not_mentioned"],
+                                      "description": "For an internship/co-op only: does the posting state the candidate must be enrolled after the internship, or returning for another term/quarter/semester? 'required' only when the posting actually says so; 'not_mentioned' when it is silent; 'not_an_internship' for a full-time role."},
         "fit_score": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Attractiveness for an F-1 new grad: unlikely sponsorship caps it at 2."},
         "summary": {"type": "string", "description": "One or two sentences a candidate can read in a list."},
         "evidence": {"type": "array", "items": {"type": "string"}, "description": "Verbatim quotes from the posting that support statement/requires_citizenship/new_grad_fit."},
         "sources": {"type": "array", "items": {"type": "string"}, "description": "URLs consulted."},
     },
-    "required": ["statement", "requires_citizenship", "company_verdict", "company_evidence", "verdict", "new_grad_fit", "fit_score", "summary", "evidence", "sources"],
+    "required": ["statement", "requires_citizenship", "company_verdict", "company_evidence", "verdict", "new_grad_fit",
+                 "intern_return_requirement", "fit_score", "summary", "evidence", "sources"],
 }
 
 
@@ -80,9 +85,21 @@ def model_label(cfg):
 def save_screening_settings(path: Path, updates: dict[str, Any]) -> dict[str, Any]:
     """Update only the UI's screening settings, preserving search filters and limits."""
     cfg = json.loads(path.read_text())
-    changes = {k: updates[k] for k in ("enabled", "provider", "model", "codex_model", "codex_reasoning_effort") if k in updates}
+    changes = {k: updates[k] for k in ("enabled", "provider", "model", "codex_model", "codex_reasoning_effort",
+                                       "max_per_run") if k in updates}
     if "enabled" in changes and not isinstance(changes["enabled"], bool):
         raise ValueError("enabled must be true or false")
+    if "max_per_run" in changes:
+        # Each screened job is a billed model call, so this is the per-scan
+        # spend cap. Bounded rather than free-form: 0 would silently look like
+        # "screening is on" while never screening anything, and an unbounded
+        # number turns one scan of a large backlog into an unbounded bill.
+        try:
+            changes["max_per_run"] = int(changes["max_per_run"])
+        except (TypeError, ValueError):
+            raise ValueError("Jobs per scan must be a whole number")
+        if not 1 <= changes["max_per_run"] <= 200:
+            raise ValueError("Jobs per scan must be between 1 and 200")
     for key in ("model", "codex_model"):
         if key in changes:
             if not isinstance(changes[key], str):
@@ -106,7 +123,7 @@ def save_screening_settings(path: Path, updates: dict[str, Any]) -> dict[str, An
 from jobFilter.duplicates import company_key  # noqa: E402  (shared with duplicate tagging)
 
 
-from jobFilter.descriptions import fetch_description  # noqa: E402,F401  (kept for callers)
+from jobFilter.descriptions import fetch_description, stated_refusal  # noqa: E402,F401  (fetch_description kept for callers)
 
 # ----- the LLM call -----------------------------------------------------------------
 def build_prompt(row: dict[str, Any], description: str, cached: Optional[dict[str, Any]]) -> str:
@@ -130,6 +147,7 @@ TASKS
 1. Read the posting text below (fetch the apply URL with WebFetch if the text is missing or truncated). Decide `statement`: does it say it sponsors / will not sponsor (or requires current authorization without sponsorship) / says nothing. Set `requires_citizenship` if it needs US citizenship, permanent residency, a security clearance, or ITAR/export-control eligibility. Quote the exact sentences in `evidence`.
 2. Company sponsorship history, unless KNOWN COMPANY SPONSORSHIP is given above: use WebSearch (2-4 searches, e.g. "<company> H-1B", "<company> h1bdata", "<company> visa sponsorship new grad") and WebFetch the most useful result (h1bdata.info, myvisajobs.com, h1bgrader.com, the company's careers FAQ). Record concrete facts with years and counts in `company_evidence` and the URLs in `sources`. Judge `company_verdict`: likely = files H-1B petitions regularly for software roles and no stated no-sponsorship policy; unlikely = few or no filings or a stated policy against sponsorship; unknown otherwise.
 3. `new_grad_fit`: true if 0-1 years or a recent degree qualifies.
+3b. `intern_return_requirement`: for an internship or co-op posting, decide whether it requires the candidate to still be enrolled, or to return to school for another term/quarter/semester, AFTER the internship ends. Answer `required` only if the posting states it (quote the sentence in `evidence`); `not_mentioned` if it is silent about it; `not_required` if it says graduating students are eligible. Use `not_an_internship` for a full-time role. Do not infer the requirement from the word "intern" alone.
 4. `verdict`: unlikely if statement is no_sponsorship or requires_citizenship; likely if statement is sponsors; otherwise the company verdict. Conflicting job-specific visa fields and description text mean unknown, requiring employer confirmation; company history cannot resolve this conflict. "US citizen/visa only" does not mean citizens only and does not establish future H-1B sponsorship. Include both conflicting statements in evidence and explain the conflict in summary. `fit_score` 0-10 with unlikely capped at 2. `summary`: one or two plain sentences.
 
 Be fast: do not browse beyond what is needed for these fields.
@@ -177,6 +195,30 @@ def screen_job(store: Store, row: dict[str, Any], cfg: dict[str, Any]) -> dict[s
     cached = store.company_sponsorship(ckey, cfg["company_cache_days"]) if ckey else None
     description = fetch_description(row)
     t0 = time.time()
+
+    # The description is already in hand here, so reading it for a stated
+    # refusal costs nothing. A posting that says outright it will not sponsor
+    # cannot be screened into "likely" by anything the model would find, so
+    # the paid call is skipped. Measured on this install's first 40 screenings
+    # it applies to about 1 in 20, and it can never replace screening: a
+    # company with no H-1B filing history reads as "unlikely" only after a web
+    # search. Set screening.refusal_skips_llm to false to always pay for the
+    # model instead; the matched sentence is stored either way.
+    refusal = stated_refusal(description) if cfg.get("refusal_skips_llm", True) else None
+    if refusal:
+        data = {
+            "status": "ok", "verdict": "unlikely", "statement": "no_sponsorship",
+            "requires_citizenship": None, "new_grad_fit": None,
+            "intern_return_requirement": "not_mentioned", "fit_score": 2,
+            "summary": "The posting states it does not offer visa sponsorship. "
+                       "Decided from the posting text alone; no model was called.",
+            "evidence": [refusal], "sources": [job.get("apply_url")] if job.get("apply_url") else [],
+            "model": "phrase-rule", "cost_usd": 0.0, "seconds": round(time.time() - t0, 1),
+            "description_chars": len(description),
+        }
+        store.save_screening(row["id"], data)
+        return data
+
     try:
         prompt = build_prompt(row, description, cached)
         if cfg.get("provider") == "codex":
@@ -195,6 +237,7 @@ def screen_job(store: Store, row: dict[str, Any], cfg: dict[str, Any]) -> dict[s
     data = {
         "status": "ok", "verdict": out.get("verdict"), "statement": out.get("statement"),
         "requires_citizenship": out.get("requires_citizenship"), "new_grad_fit": out.get("new_grad_fit"),
+        "intern_return_requirement": out.get("intern_return_requirement"),
         "fit_score": out.get("fit_score"), "summary": out.get("summary"),
         "evidence": (out.get("evidence") or []) + [f"[company] {x}" for x in (out.get("company_evidence") or [])],
         "sources": out.get("sources") or [], "model": evt.get("model") or model_label(cfg),

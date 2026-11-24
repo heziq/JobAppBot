@@ -20,6 +20,7 @@ class ResumeVersionTests(unittest.TestCase):
         self.patches = [patch.object(profile, "RESUME_DIR", self.resumes),
                         patch.object(profile, "RESUME_TEXT_PATH", self.root / "resume.txt"),
                         patch.object(profile, "ROLES_PATH", self.root / "role_descriptions.json"),
+                        patch.object(profile, "ROLE_OVERRIDES_PATH", self.root / "role_overrides.json"),
                         patch.object(profile, "SETTINGS_PATH", self.root / "settings.json"),
                         patch.object(profile, "resume_text", side_effect=lambda refresh=False, path=None: f"text of {(path or profile.resume_path()).name}"),
                         patch.object(profile, "load_profile", return_value={"name": "Alex Example"}),

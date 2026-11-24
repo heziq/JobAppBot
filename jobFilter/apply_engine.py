@@ -91,6 +91,40 @@ def effective_settings() -> dict[str, Any]:
 
 # ----- prompt --------------------------------------------------------------
 
+def upload_directories(app: dict[str, Any], settings: dict[str, Any],
+                       letter: Optional[dict[str, Any]] = None) -> list[Path]:
+    """Directories the run must be able to read, for `--add-dir`.
+
+    Always `data/`. Also the REAL directory of every file the run uploads: a
+    résumé in `setup/resume/` is commonly a symlink to the PDF that LaTeX
+    builds elsewhere (which is what keeps a recompile live), and the upload
+    tool resolves the link and refuses the target as not shared with the
+    session. Resolving it here shares the one folder that holds it instead of
+    asking the user to break the symlink, and stays inside what the task
+    already needs rather than widening access generally.
+    """
+    directories = [ROOT / "data"]
+    paths = [prof.resume_path(version) for version in prof.RESUME_RULES]
+    paths.append(prof.resume_path())
+    paths.append((letter or {}).get("path"))
+    try:
+        paths.append(prof.application_resume(app["job"], (settings or {}).get("resume"))["path"])
+    except Exception:
+        pass    # a missing or unreadable résumé is reported by the run itself
+    for path in paths:
+        if not path:
+            continue
+        try:
+            parent = Path(path).resolve().parent
+        except OSError:
+            continue
+        if not parent.is_dir() or parent == ROOT or ROOT in parent.parents:
+            continue    # already reachable from the working directory
+        if parent not in directories:
+            directories.append(parent)
+    return directories
+
+
 def build_prompt(app: dict[str, Any], work_dir: Path, letter: Optional[dict[str, Any]] = None) -> str:
     job = app["job"]
     letter = letter or {}
@@ -312,7 +346,9 @@ def run_application(store: Store, app: dict[str, Any]) -> dict[str, Any]:
     cmd = [claude, "-p", prompt, "--chrome", "--output-format", "stream-json", "--verbose",
            "--json-schema", json.dumps(RESULT_SCHEMA), "--max-turns", str(settings["max_turns"]),
            "--model", settings["model"],
-           "--allowedTools", "mcp__claude-in-chrome", "Read", "Grep", "--add-dir", str(ROOT / "data")]
+           "--allowedTools", "mcp__claude-in-chrome", "Read", "Grep"]
+    for directory in upload_directories(app, settings, letter):
+        cmd += ["--add-dir", str(directory)]
     if resuming:
         cmd += ["--resume", app["session_id"]]
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}

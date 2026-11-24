@@ -59,3 +59,46 @@ The first recommendation is implemented. A generated prompt using the current re
 - Existing model choices, turn limits, browser integration, and resume session IDs are retained. **New applications get the smaller prompt; existing resumed Claude sessions retain their previous context.**
 
 Validation: 100 Python tests pass, including lossless/idempotent migration, concurrent lesson writes, prompt size independent of archive growth, preservation of long applicant records, lazy guide availability, and Claude command/resume behavior. The skill validator passes. No live employer application was run for this change; actual quota savings and form completion quality still need observation on subsequent applications.
+
+## Implemented: 2026-11-24 — recommendation 2 (redundant browser observation)
+
+Recommendation 2 had not been acted on. A live SmartRecruiters attempt (Sonnet,
+2026-11-23) gave the first per-call breakdown of a real run:
+
+| Calls | |
+| ---: | --- |
+| 111 | tool calls in total |
+| 17 | `computer` screenshots |
+| 26 / 20 | `left_click` / `type` |
+| 8 / 3 / 6 / 6 | `read_page` / `get_page_text` / `find` / `javascript_exec` |
+| 2 | `form_input` |
+
+The run filled **six fields** and then stopped on a blocked résumé upload, so
+those 17 screenshots bought six values. The split that matters is not
+fill-vs-verify but **text reads vs images**: a `type` call carries a few dozen
+tokens, while every screenshot enters the context as an image and is re-read by
+each later request. Filling is close to free; looking is what costs.
+
+Two causes, both addressed:
+
+- **A screenshot after each ordinary text field.** `guidance/SKILL.md` step 3
+  now says to fill a section's independent fields, read them back with
+  `read_page`/`get_page_text` rather than a screenshot, and reserve screenshots
+  for a page's first look, ambiguity a text read cannot settle, an error state,
+  an unresponsive control, and the final review in step 10.
+- **Shadow DOM forced coordinate clicking.** SmartRecruiters puts its inputs in
+  a shadow root, so `form_input` was usable twice in the whole run and the rest
+  went through click-at-coordinates, which needs a screenshot to aim. The
+  shadow-root traversal the run worked out is recorded in `guidance/wizards.md`
+  so the next attempt does not rediscover it.
+
+The core prompt grew 4370 → 4736 characters for the screenshot rule. The size
+guard in `tests/test_application_guidance.py` moved 12000 → 12500 to admit it;
+the invariants that guard actually protects — no archive text in the prompt, and
+a byte-identical prompt after lessons are appended — are unchanged. Platform
+mechanics stay in the lazy guides, which cost nothing per run.
+
+Not yet measured: whether the new rule reduces screenshots in practice. It is an
+instruction to the agent, not an enforced cap, and no live application has run
+under it. Compare screenshot counts in `data/apply/*/log.txt` across the next
+few attempts before claiming a saving.

@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS screenings (
     statement     TEXT,                     -- what the posting itself says: sponsors | no_sponsorship | not_mentioned
     requires_citizenship INTEGER,
     new_grad_fit  INTEGER,
+    intern_return_requirement TEXT,   -- not_an_internship | required | not_required | not_mentioned
     fit_score     INTEGER,
     summary       TEXT,
     evidence_json TEXT,
@@ -111,8 +112,13 @@ def _iso() -> str:
 NORM_KEY_VERSION = 5  # Greenhouse variants; preserve full Workday year-prefixed requisitions.
 
 APP_STATUSES = ("queued", "running", "review_ready", "needs_answer", "needs_cover_letter", "needs_login", "captcha",
-                "already_applied", "unavailable", "failed", "submitted", "skipped")
+                "already_applied", "unavailable", "failed", "submitted", "rejected", "skipped")
 ACTIVE_STATUSES = ("queued", "running")
+# Statuses that mean the job is no longer waiting on you, so Pending is cleared.
+SETTLED_STATUSES = ("queued", "running", "submitted", "rejected", "already_applied", "unavailable")
+# Already-submitted states: `rejected` is an outcome after submitting, not an
+# un-submit, so moving between these must not change the submission date.
+SUBMITTED_STATUSES = ("submitted", "rejected")
 
 
 class Store:
@@ -157,6 +163,12 @@ class Store:
         if "settings_json" not in {r[1] for r in self.conn.execute("PRAGMA table_info(applications)")}:
             self.conn.execute("ALTER TABLE applications ADD COLUMN settings_json TEXT")
             self.conn.commit()
+
+        # screenings gained a column after the first release; CREATE TABLE IF NOT
+        # EXISTS cannot add it to a database that already has the table.
+        if "intern_return_requirement" not in {r[1] for r in self.conn.execute("PRAGMA table_info(screenings)")}:
+            with self.conn:
+                self.conn.execute("ALTER TABLE screenings ADD COLUMN intern_return_requirement TEXT")
 
         app_columns = {r[1] for r in self.conn.execute("PRAGMA table_info(applications)")}
         if "submitted_at" not in app_columns:
@@ -286,7 +298,7 @@ class Store:
             raise ValueError("Unknown job")
         if changes.get("pending"):
             app = self.get_application(job_id)
-            if app and app["status"] in ("queued", "running", "submitted", "already_applied", "unavailable"):
+            if app and app["status"] in SETTLED_STATUSES:
                 raise ValueError("Only an unfinished, inactive job can be marked pending. Stop an active attempt first.")
         saved = {**row["review_overrides"], **changes}
         if "custom_tags" in saved:
@@ -317,11 +329,13 @@ class Store:
     def save_screening(self, job_id: str, data: dict[str, Any]) -> None:
         self.conn.execute(
             """INSERT OR REPLACE INTO screenings (job_id, status, verdict, statement, requires_citizenship, new_grad_fit,
+                                                  intern_return_requirement,
                                                   fit_score, summary, evidence_json, sources_json, model, cost_usd, screened_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, data.get("status", "ok"), data.get("verdict"), data.get("statement"),
              None if data.get("requires_citizenship") is None else int(bool(data["requires_citizenship"])),
              None if data.get("new_grad_fit") is None else int(bool(data["new_grad_fit"])),
+             data.get("intern_return_requirement"),
              data.get("fit_score"), data.get("summary"), json.dumps(data.get("evidence") or []),
              json.dumps(data.get("sources") or []), data.get("model"), data.get("cost_usd"), _iso()))
         self.conn.commit()
@@ -351,6 +365,20 @@ class Store:
         sql += " ORDER BY j.first_seen DESC LIMIT ?"
         params.append(limit)
         return [self._row(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def screening_cost_per_job(self, limit: int = 200) -> dict[str, Any]:
+        """Average cost of a recent screening, for pricing the per-scan cap.
+
+        Recent rather than lifetime, so changing the screening model is
+        reflected rather than averaged away. `average` is None until something
+        has been screened with a recorded cost, and the caller shows no
+        estimate rather than inventing one.
+        """
+        rows = self.conn.execute(
+            "SELECT cost_usd FROM screenings WHERE cost_usd IS NOT NULL AND cost_usd > 0 "
+            "ORDER BY screened_at DESC LIMIT ?", (limit,)).fetchall()
+        costs = [r["cost_usd"] for r in rows]
+        return {"average": (sum(costs) / len(costs)) if costs else None, "samples": len(costs)}
 
     def company_sponsorship(self, company_key: str, max_age_days: float = 30) -> Optional[dict[str, Any]]:
         r = self.conn.execute("SELECT * FROM company_sponsorship WHERE company_key = ?", (company_key,)).fetchone()
@@ -482,12 +510,14 @@ class Store:
         fields["updated_at"] = _iso()
         if fields.get("status") == "submitted":
             current = self.get_application(job_id)
-            if current and current["status"] != "submitted":
+            # Re-submitting after the attempt reopened refreshes the date, but
+            # coming back from `rejected` keeps the original submission date.
+            if current and current["status"] not in SUBMITTED_STATUSES:
                 fields["submitted_at"] = fields["updated_at"]
                 fields["submitted_at_estimated"] = 0
         cols = ", ".join(f"{k} = ?" for k in fields)
         self.conn.execute(f"UPDATE applications SET {cols} WHERE job_id = ?", (*fields.values(), job_id))
-        if fields.get("status") in ("queued", "running", "submitted", "already_applied", "unavailable"):
+        if fields.get("status") in SETTLED_STATUSES:
             self._clear_pending(job_id)
         self.conn.commit()
 

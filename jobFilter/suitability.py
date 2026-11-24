@@ -2,6 +2,13 @@
 from __future__ import annotations
 
 STATES = ("suitable", "not_suitable", "needs_review")
+
+# `filter_reason` marks a row the search rules rejected, but it is also used to
+# keep a row out of the jobs list for other reasons. These are not rejections:
+# an unknown field the rules could not evaluate, an ingestion duplicate, or a
+# row that exists only as application history.
+IMPORTED_HISTORY_REASON = "imported application history"
+NOT_A_REJECTION = ("?", "not stated", "'None'", "duplicate", IMPORTED_HISTORY_REASON)
 TAG_VALUES = {
     "new_grad": ("yes", "no", "unknown"),
     "sponsorship": ("supported", "not_supported", "likely", "unlikely", "unknown"),
@@ -61,7 +68,7 @@ def assess(row: dict) -> dict:
     tags = {**auto_tags, **saved.get("tags", {})}
     blockers = []
     reason = row.get("filter_reason") or ""
-    if reason and not any(unknown in reason for unknown in ("?", "not stated", "'None'", "duplicate")):
+    if reason and not any(unknown in reason for unknown in NOT_A_REJECTION):
         blockers.append("Search rule: " + reason)
     if tags["new_grad"] == "no":
         blockers.append("Not a new-grad role")
@@ -69,6 +76,11 @@ def assess(row: dict) -> dict:
         blockers.append("Sponsorship explicitly not supported")
     if tags["citizenship"] == "yes":
         blockers.append("Citizenship or security clearance required")
+    # An internship that requires returning to school afterwards does not fit a
+    # final-term candidate. Only an explicit statement in the posting counts;
+    # silence means the requirement does not apply.
+    if ok and screen.get("intern_return_requirement") == "required":
+        blockers.append("Internship requires returning to school afterwards")
     if blockers:
         automatic, reasons = "not_suitable", blockers
     elif tags["new_grad"] == "yes" and tags["sponsorship"] in ("supported", "likely") and tags["citizenship"] == "no":
